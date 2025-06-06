@@ -177,9 +177,6 @@ class HumanInTheLoopFlow(CopilotKitFlow[AgentState]):
 
         return task_steps_obj.model_dump_json(indent=2)
 
-    def __repr__(self):
-        pprint(vars(self), width=120, depth=3)
-
 
 def kickoff():
     """
