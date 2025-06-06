@@ -4,46 +4,75 @@ An example demonstrating agentic generative UI.
 """
 
 from dotenv import load_dotenv
-from crewai import LLM
-from crewai.flow import start
-import sys
-from pydantic import BaseModel
-from typing import List, Dict, Any
+load_dotenv(override=True)
+
+import json
 import logging
+from pprint import pprint
+from typing import Optional
+from crewai import LLM
+from crewai.flow import start, persist
+import sys
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any
 import traceback
 
-
-
-# Import from copilotkit_integration
-from human_in_the_loop.copilotkit_integration import (
-    CopilotKitFlow
+from copilotkit.crewai import (
+    CopilotKitFlow,
+    tool_calls_log,
+    FlowInputState,
 )
 
-# Import our custom tool
-from human_in_the_loop.tools.custom_tool import TaskStepsGenerator
-
-# Load environment variables from .env file
-load_dotenv()
-
-# Configure logging at the start of the file
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),  # Output to console
-        logging.FileHandler('human_in_the_loop.log')  # Output to file
-    ]
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class AgentInputState(BaseModel):
-    """Defines the expected input state for the AgenticChatFlow."""
-    messages: List[Dict[str, str]] = [] # Current message(s) from the user
-    tools: List[Dict[str, Any]] = [] # CopilotKit tool format: name, description, parameters
-    conversation_history: List[Dict[str, str]] = [] # Full conversation history (persisted between runs)
+GENERATE_TASK_STEPS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "generate_task_steps",
+        "description": "Generate a list of steps required to complete a task",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "The task to generate steps for"
+                },
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "step_number": {"type": "integer"},
+                            "description": {"type": "string"},
+                            "enabled": {"type": "boolean", "default": True}
+                        },
+                        "required": ["step_number", "description"]
+                    },
+                    "description": "Array of steps needed to complete the task"
+                }
+            },
+            "required": ["task", "steps"]
+        }
+    }
+}
 
+class TaskSteps(BaseModel):
+    """
+    Task steps with user-controllable enable/disable functionality.
+    """
+    task: str = Field(..., description="The task description")
+    steps: List[Dict[str, Any]] = Field(..., description="List of task steps")
 
-class HumanInTheLoopFlow(CopilotKitFlow[AgentInputState]):
+class AgentState(FlowInputState):
+    """
+    The state of the task execution.
+    """
+    task_steps: Optional[dict] = None
+
+@persist()
+class HumanInTheLoopFlow(CopilotKitFlow[AgentState]):
+
     @start()
     def chat(self):
         """
@@ -51,8 +80,16 @@ class HumanInTheLoopFlow(CopilotKitFlow[AgentInputState]):
         """
 
         try:
+            current_task_info = "No task steps created yet"
+            if self.state.task_steps:
+                steps_info = []
+                for step in self.state.task_steps.get('steps', []):
+                    status = "✅" if step.get('enabled', True) else "❌"
+                    steps_info.append(f"{status} Step {step['step_number']}: {step['description']}")
+                current_task_info = f"Task: {self.state.task_steps['task']}\nSteps:\n" + "\n".join(steps_info)
+
             # Define system prompt for the LLM
-            system_prompt = """
+            system_prompt = f"""
                 You are a helpful assistant that can perform any task.
                 You MUST call the `generate_task_steps` function when the user asks you to perform a task.
                 When the function `generate_task_steps` is called, the user will decide to enable or disable a step.
@@ -61,98 +98,107 @@ class HumanInTheLoopFlow(CopilotKitFlow[AgentInputState]):
                 However, you should find a creative workaround to perform the task, and if an essential step is disabled, you can even use
                 some humor in the description of how you are performing the task.
                 Don't just repeat a list of steps, come up with a creative but short description (3 sentences max) of how you are performing the task.
+
+                Current task state: ----
+                {current_task_info}
+                -----
             """
 
-            messages = self.get_message_history(system_prompt=system_prompt)
+            logger.info(f"System prompt: {system_prompt}")
 
-            # Create task generator tool instance
-            task_generator = TaskStepsGenerator()
-
-            # Format tool for LLM
-            formatted_tool = {
-                "type": "function",
-                "function": {
-                    "name": task_generator.name,
-                    "description": task_generator.description,
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "task": {
-                                "type": "string",
-                                "description": "The task to generate steps for"
-                            }
-                        },
-                        "required": ["task"]
-                    }
-                }
-            }
-
-            # Create available functions dictionary
-            available_functions = {
-                task_generator.name: lambda task: task_generator.run(task)
-            }
-
-            # Initialize the LLM
+            # Initialize CrewAI LLM with streaming enabled
             llm = LLM(model="gpt-4o", stream=True)
 
-            # Call LLM with properly formatted tools
-            print(f"Calling LLM with {len(messages)} messages and tools")
-            response = llm.call(
+            # Get message history using the base class method
+            messages = self.get_message_history(system_prompt=system_prompt)
+
+            print(f"Messages: {messages}")
+
+            # Ensure we have the user messages from the input state
+            if hasattr(self.state, 'messages') and self.state.messages:
+                for msg in self.state.messages:
+                    if msg.get('role') == 'user' and msg not in messages:
+                        messages.append(msg)
+
+            # Track tool calls
+            initial_tool_calls_count = len(tool_calls_log)
+            logger.info(f"Initial tool calls count: {initial_tool_calls_count}")
+
+            response_content = llm.call(
                 messages=messages,
-                tools=[formatted_tool],
-                available_functions=available_functions
+                tools=[GENERATE_TASK_STEPS_TOOL],
+                available_functions={"generate_task_steps": self.generate_task_steps_handler}
             )
 
-            print(f"LLM response: {response}")
+            logger.info(f"Response content: {response_content}")
 
-            # Initialize messages list if it doesn't exist
-            if not hasattr(self.state, "messages"):
-                self.state.messages = []
+            # Handle tool responses using the base class method
+            final_response = self.handle_tool_responses(
+                llm=llm,
+                response_text=response_content,
+                messages=messages,
+                tools_called_count_before_llm_call=initial_tool_calls_count
+            )
 
-            # Append the new message to the messages in state
-            self.state.messages.append({
-                "role": "assistant",
-                "content": response
+            # Check if tools were actually called
+            final_tool_calls_count = len(tool_calls_log)
+            tools_called = final_tool_calls_count - initial_tool_calls_count
+            logger.info(f"Tools called during this interaction: {tools_called}")
+
+            # ---- Maintain conversation history ----
+            # 1. Add the current user message(s) to conversation history
+            for msg in self.state.messages:
+                if msg.get('role') == 'user' and msg not in self.state.conversation_history:
+                    self.state.conversation_history.append(msg)
+
+            # 2. Add the assistant's response to conversation history
+            assistant_message = {"role": "assistant", "content": final_response}
+            self.state.conversation_history.append(assistant_message)
+
+            return json.dumps({
+                "response": final_response,
+                "id": self.state.id
             })
 
-            return response
-
         except Exception as e:
-            print(f"CHAT ERROR: {str(e)}")
+            logger.error(f"CHAT ERROR: {str(e)}")
             return f"\n\nAn error occurred: {str(e)}\n\n"
+
+    def generate_task_steps_handler(self, task, steps):
+        """Handler for the generate_task_steps tool"""
+        # Convert the task steps data to a TaskSteps object for validation
+        task_steps_data = {
+            "task": task,
+            "steps": steps
+        }
+        task_steps_obj = TaskSteps(**task_steps_data)
+        # Store as dict for JSON serialization, but validate first
+        self.state.task_steps = task_steps_obj.model_dump()
+
+        return task_steps_obj.model_dump_json(indent=2)
+
+    def __repr__(self):
+        pprint(vars(self), width=120, depth=3)
 
 
 def kickoff():
     """
     Start the flow with comprehensive logging and event bus diagnostics
     """
-    print("Starting Human-in-the-Loop flow...")
-    logger.info("=" * 50)
-    logger.info("🚀 Initiating Human-in-the-Loop Flow 🚀")
-    logger.info("=" * 50)
 
     try:
-        # Log event bus details before registration
-        logger.info("Checking CrewAI event bus...")
-        from crewai.utilities.events import crewai_event_bus
-        logger.info(f"Event Bus Type: {type(crewai_event_bus)}")
-        logger.info(f"Event Bus Methods: {dir(crewai_event_bus)}")
-
-        # Explicitly register tool call listener with logging
-        logger.info("Registering tool call listener...")
-
         # Create flow instance
         human_in_the_loop_flow = HumanInTheLoopFlow()
 
-        # Log flow kickoff details
-        logger.info("Initiating flow kickoff...")
+        # Initialize the state with messages
+        user_message = {
+            "role": "user",
+            "content": "go to mars!"
+        }
+
         kickoff_result = human_in_the_loop_flow.kickoff({
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "go to mars!"
-                }
-            ]
+            "messages": [user_message],
+            "task_steps": None
         })
 
         logger.info(f"Flow Kickoff Result: {kickoff_result}")
