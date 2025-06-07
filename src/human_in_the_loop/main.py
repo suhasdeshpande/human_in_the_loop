@@ -78,6 +78,8 @@ class HumanInTheLoopFlow(CopilotKitFlow[AgentState]):
         Standard chat node that processes messages and handles tool calls.
         """
 
+        logger.info(f"State has task_steps: {self.state.task_steps is not None}")
+
         try:
             current_task_info = "No task steps created yet"
             if self.state.task_steps:
@@ -231,7 +233,7 @@ def kickoff():
         human_in_the_loop_flow = HumanInTheLoopFlow()
         kickoff_result = human_in_the_loop_flow.kickoff({
             "messages": [actual_user_message],
-            "task_steps": existing_task_steps
+            # "task_steps": existing_task_steps
         })
 
         print(f"Result: {kickoff_result}")
