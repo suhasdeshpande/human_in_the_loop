@@ -79,6 +79,45 @@ class HumanInTheLoopFlow(CopilotKitFlow[AgentState]):
         """
 
         logger.info(f"State has task_steps: {self.state.task_steps is not None}")
+        logger.info(f"Full state.task_steps: {self.state.task_steps}")
+        logger.info(f"State type: {type(self.state)}")
+        logger.info(f"State attributes: {list(vars(self.state).keys()) if hasattr(self.state, '__dict__') else 'No __dict__'}")
+
+        # ENTERPRISE FIX: If task_steps is None, try to extract from conversation history
+        if self.state.task_steps is None:
+            logger.info("task_steps is None, checking conversation history for previous task steps...")
+            if hasattr(self.state, 'conversation_history') and self.state.conversation_history:
+                for msg in reversed(self.state.conversation_history):  # Check most recent first
+                    if msg.get('role') == 'assistant' and msg.get('content'):
+                        content = msg.get('content', '')
+                        # Look for JSON task steps in assistant responses
+                        if '"task":' in content and '"steps":' in content:
+                            try:
+                                import re
+                                # Extract JSON from the response
+                                json_match = re.search(r'\{.*"task".*"steps".*\}', content, re.DOTALL)
+                                if json_match:
+                                    task_steps_json = json_match.group(0)
+                                    extracted_steps = json.loads(task_steps_json)
+                                    self.state.task_steps = extracted_steps
+                                    logger.info(f"Successfully extracted task_steps from conversation history: {extracted_steps.get('task', 'Unknown task')}")
+                                    break
+                            except (json.JSONDecodeError, Exception) as e:
+                                logger.warning(f"Failed to extract task_steps from conversation: {e}")
+                                continue
+
+            # Also check current messages for tool call results
+            if self.state.task_steps is None and hasattr(self.state, 'messages') and self.state.messages:
+                for msg in self.state.messages:
+                    if msg.get('toolCallId'):  # This indicates a response to a tool call
+                        logger.info("Found message with toolCallId - user has already interacted with generated steps")
+                        # For now, create a minimal task structure to indicate steps were generated
+                        self.state.task_steps = {
+                            "task": "Task steps were previously generated",
+                            "steps": [{"step_number": 1, "description": "Previous steps exist", "enabled": True}]
+                        }
+                        logger.info("Created placeholder task_steps to indicate previous interaction")
+                        break
 
         try:
             current_task_info = "No task steps created yet"
@@ -189,6 +228,15 @@ class HumanInTheLoopFlow(CopilotKitFlow[AgentState]):
 
     def generate_task_steps_handler(self, task, steps):
         """Handler for the generate_task_steps tool"""
+        logger.info(f"generate_task_steps_handler called with task: {task}")
+        logger.info(f"generate_task_steps_handler called with {len(steps)} steps")
+
+        # Ensure all steps have the 'enabled' field set to True by default
+        for step in steps:
+            if 'enabled' not in step:
+                step['enabled'] = True
+                logger.info(f"Added enabled=True to step {step.get('step_number', '?')}: {step.get('description', 'Unknown')[:50]}...")
+
         # Convert the task steps data to a TaskSteps object for validation
         task_steps_data = {
             "task": task,
@@ -197,6 +245,9 @@ class HumanInTheLoopFlow(CopilotKitFlow[AgentState]):
         task_steps_obj = TaskSteps(**task_steps_data)
         # Store as dict for JSON serialization, but validate first
         self.state.task_steps = task_steps_obj.model_dump()
+
+        logger.info(f"Set self.state.task_steps to: {self.state.task_steps}")
+        logger.info(f"State now has task_steps: {self.state.task_steps is not None}")
 
         return task_steps_obj.model_dump_json(indent=2)
 
@@ -207,40 +258,44 @@ def kickoff():
     """
 
     try:
-        # Test the actual input format from frontend
-        print("=== Testing actual frontend input format ===")
+        print("=== Simulating real Enterprise behavior: Multiple flow instances ===")
 
-        # Simulate the task_steps being already set from a previous interaction
-        existing_task_steps = {
-            "task": "Travel to Mars",
-            "steps": [
-                {"step_number": 1, "description": "Plan the mission and get necessary approvals from space agencies.", "enabled": True},
-                {"step_number": 2, "description": "Build a spacecraft capable of traveling to Mars.", "enabled": True},
-                {"step_number": 3, "description": "Train the astronauts for the journey.", "enabled": True},
-                {"step_number": 4, "description": "Launch the spacecraft towards Mars.", "enabled": True},
-                {"step_number": 5, "description": "Navigate the spacecraft to ensure it follows the correct trajectory.", "enabled": True},
-            ]
+        # STEP 1: First interaction - generate steps
+        print("\n--- STEP 1: First interaction (generate steps) ---")
+        flow1 = HumanInTheLoopFlow()
+
+        user_message_1 = {
+            "role": "user",
+            "content": "go to mars!"
         }
 
-        # This is the actual message format from the frontend
-        actual_user_message = {
+        result1 = flow1.kickoff({
+            "messages": [user_message_1],
+            "task_steps": None
+        })
+
+        print(f"Step 1 result: {result1}")
+
+        # STEP 2: Second interaction - different flow instance (simulating enterprise)
+        print("\n--- STEP 2: Second interaction (new flow instance - enterprise behavior) ---")
+        flow2 = HumanInTheLoopFlow()  # NEW FLOW INSTANCE!
+
+        user_message_2 = {
             "id": "result-20e61e17-8ee0-4f14-97c9-48a4e8297ac6",
             "role": "user",
             "content": "The user selected the following steps: 'Plan the mission and get necessary approvals from space agencies.', 'Build a spacecraft capable of traveling to Mars.', 'Train the astronauts for the journey.', 'Launch the spacecraft towards Mars.', 'Navigate the spacecraft to ensure it follows the correct trajectory.'",
             "toolCallId": "20e61e17-8ee0-4f14-97c9-48a4e8297ac6"
         }
 
-        human_in_the_loop_flow = HumanInTheLoopFlow()
-        kickoff_result = human_in_the_loop_flow.kickoff({
-            "messages": [actual_user_message],
-            # "task_steps": existing_task_steps
+        # This simulates what happens in enterprise - NO task_steps passed!
+        result2 = flow2.kickoff({
+            "messages": [user_message_2],
+            # task_steps: None  # This is what's happening in enterprise!
         })
 
-        print(f"Result: {kickoff_result}")
+        print(f"Step 2 result: {result2}")
 
-        logger.info("✅ Human-in-the-Loop flow completed successfully")
-        logger.info("=" * 50)
-
+        logger.info("✅ Enterprise simulation completed")
         return 0
 
     except Exception as e:
