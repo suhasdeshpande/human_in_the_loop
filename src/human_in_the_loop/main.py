@@ -8,7 +8,6 @@ load_dotenv(override=True)
 
 import json
 import logging
-from pprint import pprint
 from typing import Optional
 from crewai import LLM
 from crewai.flow import start, persist
@@ -99,9 +98,8 @@ class HumanInTheLoopFlow(CopilotKitFlow[AgentState]):
                 some humor in the description of how you are performing the task.
                 Don't just repeat a list of steps, come up with a creative but short description (3 sentences max) of how you are performing the task.
 
-                Current task state: ----
+                Current task state:
                 {current_task_info}
-                -----
             """
 
             logger.info(f"System prompt: {system_prompt}")
@@ -111,8 +109,6 @@ class HumanInTheLoopFlow(CopilotKitFlow[AgentState]):
 
             # Get message history using the base class method
             messages = self.get_message_history(system_prompt=system_prompt)
-
-            print(f"Messages: {messages}")
 
             # Ensure we have the user messages from the input state
             if hasattr(self.state, 'messages') and self.state.messages:
@@ -184,21 +180,37 @@ def kickoff():
     """
 
     try:
-        # Create flow instance
-        human_in_the_loop_flow = HumanInTheLoopFlow()
+        # Test the actual input format from frontend
+        print("=== Testing actual frontend input format ===")
 
-        # Initialize the state with messages
-        user_message = {
-            "role": "user",
-            "content": "go to mars!"
+        # Simulate the task_steps being already set from a previous interaction
+        existing_task_steps = {
+            "task": "Travel to Mars",
+            "steps": [
+                {"step_number": 1, "description": "Plan the mission and get necessary approvals from space agencies.", "enabled": True},
+                {"step_number": 2, "description": "Build a spacecraft capable of traveling to Mars.", "enabled": True},
+                {"step_number": 3, "description": "Train the astronauts for the journey.", "enabled": True},
+                {"step_number": 4, "description": "Launch the spacecraft towards Mars.", "enabled": True},
+                {"step_number": 5, "description": "Navigate the spacecraft to ensure it follows the correct trajectory.", "enabled": True},
+            ]
         }
 
+        # This is the actual message format from the frontend
+        actual_user_message = {
+            "id": "result-20e61e17-8ee0-4f14-97c9-48a4e8297ac6",
+            "role": "user",
+            "content": "The user selected the following steps: 'Plan the mission and get necessary approvals from space agencies.', 'Build a spacecraft capable of traveling to Mars.', 'Train the astronauts for the journey.', 'Launch the spacecraft towards Mars.', 'Navigate the spacecraft to ensure it follows the correct trajectory.'",
+            "toolCallId": "20e61e17-8ee0-4f14-97c9-48a4e8297ac6"
+        }
+
+        human_in_the_loop_flow = HumanInTheLoopFlow()
         kickoff_result = human_in_the_loop_flow.kickoff({
-            "messages": [user_message],
-            "task_steps": None
+            "messages": [actual_user_message],
+            "task_steps": existing_task_steps
         })
 
-        logger.info(f"Flow Kickoff Result: {kickoff_result}")
+        print(f"Result: {kickoff_result}")
+
         logger.info("✅ Human-in-the-Loop flow completed successfully")
         logger.info("=" * 50)
 
