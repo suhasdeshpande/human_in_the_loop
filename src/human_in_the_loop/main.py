@@ -88,19 +88,29 @@ class HumanInTheLoopFlow(CopilotKitFlow[AgentState]):
                 current_task_info = f"Task: {self.state.task_steps['task']}\nSteps:\n" + "\n".join(steps_info)
 
             # Define system prompt for the LLM
-            system_prompt = f"""
-                You are a helpful assistant that can perform any task.
-                You MUST call the `generate_task_steps` function when the user asks you to perform a task.
-                When the function `generate_task_steps` is called, the user will decide to enable or disable a step.
-                After the user has decided which steps to perform, provide a textual description of how you are performing the task.
-                If the user has disabled a step, you are not allowed to perform that step.
-                However, you should find a creative workaround to perform the task, and if an essential step is disabled, you can even use
-                some humor in the description of how you are performing the task.
-                Don't just repeat a list of steps, come up with a creative but short description (3 sentences max) of how you are performing the task.
+            if self.state.task_steps is None:
+                # No task steps exist - instruct to call tool
+                system_prompt = f"""
+                    You are a helpful assistant that can perform any task.
+                    The user is asking you to perform a task for the first time.
+                    You MUST call the `generate_task_steps` function to break down the task into steps.
+                    After calling this function, the user will decide which steps to enable or disable.
 
-                Current task state:
-                {current_task_info}
-            """
+                    Current task state:
+                    {current_task_info}
+                """
+            else:
+                # Task steps exist - instruct to provide description only
+                system_prompt = f"""
+                    You are a helpful assistant that can perform any task.
+                    The user has already selected which steps to perform for their task.
+                    DO NOT call any functions. Instead, provide a creative and humorous textual description (3 sentences max) of how you are performing the task.
+                    If some steps are disabled, find creative workarounds and use humor to explain how you're accomplishing the task despite the limitations.
+                    Don't just repeat a list of steps - be creative and entertaining in your description.
+
+                    Current task state:
+                    {current_task_info}
+                """
 
             logger.info(f"System prompt: {system_prompt}")
 
@@ -120,10 +130,25 @@ class HumanInTheLoopFlow(CopilotKitFlow[AgentState]):
             initial_tool_calls_count = len(tool_calls_log)
             logger.info(f"Initial tool calls count: {initial_tool_calls_count}")
 
+            # Determine whether to provide tools based on actual state
+            should_provide_tools = self.state.task_steps is None
+            logger.info(f"Should provide tools: {should_provide_tools} (task_steps exists: {self.state.task_steps is not None})")
+
+            if should_provide_tools:
+                # No task steps exist - provide tool for generating steps
+                tools_to_provide = [GENERATE_TASK_STEPS_TOOL]
+                available_functions = {"generate_task_steps": self.generate_task_steps_handler}
+                logger.info("Providing generate_task_steps tool - no task steps exist yet")
+            else:
+                # Task steps exist - don't provide tools, LLM should give description
+                tools_to_provide = []
+                available_functions = {}
+                logger.info("Not providing tools - task steps already exist, expecting creative description")
+
             response_content = llm.call(
                 messages=messages,
-                tools=[GENERATE_TASK_STEPS_TOOL],
-                available_functions={"generate_task_steps": self.generate_task_steps_handler}
+                tools=tools_to_provide,
+                available_functions=available_functions
             )
 
             logger.info(f"Response content: {response_content}")
