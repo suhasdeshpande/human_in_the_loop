@@ -217,10 +217,7 @@ class HumanInTheLoopFlow(CopilotKitFlow[AgentState]):
             assistant_message = {"role": "assistant", "content": final_response}
             self.state.conversation_history.append(assistant_message)
 
-            return json.dumps({
-                "response": final_response,
-                "id": self.state.id
-            })
+            return final_response
 
         except Exception as e:
             logger.error(f"CHAT ERROR: {str(e)}")
